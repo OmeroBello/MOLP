@@ -1,0 +1,497 @@
+model PwC
+  options noimplicit
+  uses "mmxprs", "mmsystem"
+
+  forward procedure PwC_Input !lettura da file
+	forward procedure Print_Status !stato del problema
+	forward procedure PwC_Model !modello matematico (1)-(4)
+  forward procedure PwC_Euristico !euristico costruttivo greedy
+  forward procedure PwC_Ord_Decrescente !ordinamento decrescente - WSPT
+  forward procedure PwC_MultiStart !procedura multi start
+  forward procedure PwC_Ord_Casuale !ordinamento casuale - WSPT
+  forward procedure PwC_Swap !ricerca locale swap
+  forward procedure PwC_Swap_Random !ricerca locale modificata per metaeuristico
+  forward procedure PwC_Simulated !metaeuristico Simulated Annealing
+
+  declarations
+    m: integer !numero di macchine
+    n: integer !numero di job
+    inputfile = "Istanze/Tempo di processamento = 20/PwC20-3.dat"
+  end-declarations
+
+  initializations from inputfile
+		n
+		m
+	end-initializations
+
+	declarations
+    eps = 0.001 !valore piccolo a piacere
+    t1, t2: real !tempi per il calcolo dei tempi di esecuzione
+    contatore: integer !contatore necessario per inizializzare il Simulated Annealing con la soluzione dell'euristico WSPT
+    
+    !inizializzazione
+    lavori = 1..n !range dei lavori
+    macchine = 1..m !range delle macchine
+    p: array(lavori) of integer !processing time dei jobs
+    p_max: integer !massimo tempo di processamento tra i job
+    w: array(lavori) of integer !pesi dei jobs
+    T: integer !orizzonte temporale
+    
+    !algoritmo euristico
+    z_euristico: integer !valore della soluzione euristica
+    order_euristico: array(lavori) of integer !ordinamento dei job secondo WSPT
+    o_euristico: array(lavori) of integer !soluzione euristica - assegnazione dei job alle macchine, secondo l'ordinamento WSPT
+    
+    !multi start
+    z_multi: integer
+    z_multi_best: integer !valore della soluzione migliore del multi-start
+    z_multi_worst: integer !soluzione peggiore trovata dal multi-start (utile per calcolare la temperatura iniziale nel Simulated Annealing)
+    order_multi: array(lavori) of integer
+    o_multi: array(lavori) of integer
+    
+    !ricerca locale swap
+    z_swap: integer !valore della soluzione dello swap/swap random
+    order_swap: array(lavori) of integer !ordinamento dei job utilizzato all'interno dello swap/swap random
+    o_swap: array(lavori) of integer !assegnazione delle macchine ai job utilizzato all'interno dello swap/swap random
+    z_swap_best: integer !miglior valore della soluzione trovata dallo swap
+    order_swap_best: array(lavori) of integer !miglior ordinamento dei job trovato dallo swap
+    o_swap_best: array(lavori) of integer !miglior assegnamento delle macchine ai job trovato dallo swap
+    sforato: boolean !assume valore TRUE nel caso in cui lo swap ecceda T
+    
+    !metaeuristico Simulated Annealing
+    z_simulated: integer
+    o_simulated, order_simulated: array(lavori) of integer
+    minima_differenza: integer !temperatura critica/minima del Simulated Annealing (trovata attraverso il multi-start)
+    
+  end-declarations
+
+  !!!!!!!!!!!!!!!!!!!!MAIN!!!!!!!!!!!!!!!!!!!!
+
+  PwC_Input
+  PwC_Ord_Decrescente
+  
+  contatore:= 0 !contatore necessario per inizializzare il Simulated Annealing con la soluzione dell'euristico WSPT
+  
+  writeln("SOLUZIONE EURISTICO WSPT: ")
+  t1:= gettime
+  PwC_Euristico
+  t2:= gettime
+  writeln("\tTempo di completamento euristico: ", t2-t1)
+  
+  !swap best-improvement per la soluzione dell'euristico WSPT
+  t1:=gettime
+  z_multi:= z_euristico !assegnazione necessaria per l'utilizzo all'interno della procedura PwC_Swap
+  order_multi:= order_euristico
+  o_multi:= o_euristico
+  PwC_Swap
+  t2:=gettime
+  writeln("\ttempo di esecuzione della ricerca locale sulla soluzione dell'euristico WSPT = ", t2 - t1)
+  
+  PwC_MultiStart
+  
+  writeln("Inizio esecuzione Simulated Annealing: ")
+  PwC_Simulated
+  
+  PwC_Model
+
+  !!!!!!!!!!!!!!!!!!!!END-MAIN!!!!!!!!!!!!!!!!!!!!
+  
+  procedure PwC_Swap_Random !ricerca locale swap random per il Simulated Annealing
+    declarations
+      help, help2: integer
+      completion: integer !istanti di completamento
+      job1, job2: integer
+    end-declarations
+    sforato:= true
+    while (sforato) do !finchè non trovo uno swap che non sforza l'orizzonte temporale T, eseguo uno swap random
+      job1:= integer(round((n*random)+0.5))
+      job2:= integer(round((n*random)+0.5))
+      !condizioni nel caso in cui i job siano casualmente generati uguali
+      if (job1 = job2 and job2 <> n) then
+        job2+= 1
+      else 
+        if (job1 = job2 and job2 = n) then
+          job2-= 1
+        end-if
+      end-if
+      z_swap:= 0
+      order_swap:= order_simulated 
+      o_swap:= o_simulated 
+      !swap su job
+      help:= order_swap(job2) 
+      order_swap(job2):= order_swap(job1) 
+      order_swap(job1) := help
+      !writeln("\t", order_swap)
+      !swap su macchine
+      help2:= o_swap(order_swap(job2)) !salvo valore della macchina in cui viene lavorato il j-esimo job
+      o_swap(order_swap(job2)):= o_swap(order_swap(job1)) !guarda che il job j ora me lo devi fare nella macchina del job i
+      o_swap(order_swap(job1)):= help2
+      forall(k in macchine) do !calcolo z dello swap
+        completion:= 0
+        forall(l in lavori) do
+          if(o_swap(order_swap(l)) = k) then
+            completion += p(order_swap(l))
+            !writeln("\tzswap = ", completion ," * ", w(order_swap(l)))
+            if (completion > T) then !non si deve sforare l'orizzonte temporale fissato per il modello matematico. Nel caso lo si sfori, annulla lo swap che si è appena fatto
+              sforato:= true
+              break
+            end-if
+            sforato:= false
+            z_swap += (completion*w(order_swap(l)))
+          end-if
+        end-do
+        if (sforato) then
+          break
+        end-if
+      end-do
+    end-do !se si sfora T si ricerca un nuovo swap random
+    !writeln("SWAP RANDOM:")
+    !writeln("\tzswap = ", z_swap)
+  end-procedure
+  
+  procedure PwC_Simulated !metaeuristico Simulated Annealing
+    declarations
+      z_simulated_best, iter, k, deltak, iter_max, no_miglioramento, no_miglioramento_max: integer
+      o_simulated_best, order_simulated_best: array(lavori) of integer
+      prob, temperatura: real
+    end-declarations
+    t1:=gettime
+    !soluzione euristica iniziale -> trova x
+    z_simulated_best:= z_simulated !inizializzazione -> x* = x : assegnamo soluzione euristica come miglior soluzione finora trovata con Simulated (attraverso l'uso di contatore)
+    order_simulated_best:= order_simulated
+    o_simulated_best:= o_simulated
+    temperatura:= z_multi_worst - z_multi_best !calcolata come massima differenza tra valori trovati con il multi-start
+    iter:= 0 !numero iterazione senza spostamento
+    no_miglioramento:= 0 !numero iterazioni senza miglioramento
+    k:= 0 !numero iterazioni per definire lo schema statico di raffreddamento
+    deltak:= 2000 !numero iterazioni con stesso valore di temperatura 
+    iter_max:= n*50 !numero di iterazioni massime senza spostamento
+    no_miglioramento_max:= 10000*n !numero massimo di iterazioni senza miglioramento
+    while(iter < iter_max) do
+      no_miglioramento:= no_miglioramento + 1
+      PwC_Swap_Random !vicinato per soluzione -> N(x) trovato con swap random
+      if(z_swap < z_simulated) then !z_swap -> c(x') < c(x) -> z_simulated
+        !x = x'
+        z_simulated:= z_swap
+        o_simulated:= o_swap
+        order_simulated:= order_swap
+        iter:= 0 !miglioramento trovato, iterazioni senza miglioramenti vengono resettate
+        if (z_simulated < z_simulated_best) then !aggiorna miglior soluzione trovata fino ad ora
+          z_simulated_best:= z_simulated
+          order_simulated_best:= order_simulated
+          o_simulated_best:= o_simulated
+          no_miglioramento:= 0 !ho trovato un miglioramento effettivo, resetto il contatore
+        end-if
+      elif(z_swap > z_simulated) then !ecco perchè si buggava
+        prob:= random !valore random in [0,1]
+        !writeln("zswap: ", z_swap, " zsim: ", z_simulated, " z_sim_best: ", z_simulated_best , " temperatura: ", temperatura, " iterazione: ", iter, " no miglioramenti: ", no_miglioramento)
+        if (prob <= (1/exp((z_swap - z_simulated)/temperatura))) then
+          z_simulated:= z_swap
+          order_simulated:= order_swap
+          o_simulated:= o_swap
+          iter:= 0 !mi son spostato nonostante il peggioramento, resetto le iterazioni
+        else
+          iter+= 1
+        end-if
+      end-if
+      k+= 1
+      if (k = deltak and temperatura > minima_differenza) then
+        temperatura:= 0.9 * temperatura !t = a*t
+        k:= 0
+      end-if
+      if(no_miglioramento >= no_miglioramento_max) then !nel caso in cui il Simulated si dovesse bloccare, interrompi la procedura e restituisci i risultati miglior ottenuti
+        break
+      end-if
+    end-do !fine ciclo while
+    t2:=gettime
+    writeln("SIMULATED ANNEALING: ")
+    writeln("\tz_simulated_best = ", z_simulated_best)
+    writeln("\torder_simulated_best = ", order_simulated_best)
+    writeln("\torder_simulated_best = ", o_simulated_best)
+    writeln("\ttempo di esecuzione Simulated Annealing = ", t2 - t1)
+    writeln("\ttemperatura raggiunta = ", temperatura)
+    writeln("\titer = ", iter, " no_miglioramento = ", no_miglioramento)
+    writeln(" ")
+  end-procedure
+  
+  procedure PwC_Swap !ricerca locale swap best-improvement
+    declarations
+      order_swap_memoria: array(lavori) of integer !set di variabili e strutture dati necessarie per l'implementazione della ricerca locale best-improvement
+      o_swap_memoria: array(lavori) of integer
+      z_swap_incumbent: integer
+      order_swap_incumbent: array(lavori) of integer
+      o_swap_incumbent: array(lavori) of integer
+      help, help2: integer
+      completion: integer !istanti di completamento dei job sulle macchine
+      improved: boolean !assume valore TRUE nel caso in cui lo swap migliori la soluzione di partenza
+    end-declarations
+    z_swap_incumbent:= z_multi !il primo swap lo faccio sulla soluzione del multi-start, imponendola come miglior soluzione trovata finora (di questa soluzione eseguo tutti i possibili swap, anche dopo aver trovato un miglioramento -> best-improvement)
+    order_swap_memoria:= order_multi 
+    o_swap_memoria:= o_multi
+    z_swap_best:= z_swap_incumbent !swap migliore dopo aver effettuato tutti i possibili swap
+    improved:= true
+    while(improved) do 
+      improved:= false
+      forall(i in lavori) do !sviluppo dello swap
+        sforato:= false
+        forall(j in lavori | j > i) do
+          z_swap:= 0
+          order_swap:= order_swap_memoria !dalla seconda iterazione in poi, non eseguo più lo swap sulla soluzione del multi-start, ma sulla miglior soluzione trovata dallo swap precedente
+          o_swap:= o_swap_memoria 
+          help:= order_swap(j) !help mi salva il valore del job che voglio scambiare che si trova in posizione j
+          order_swap(j):= order_swap(i) !dico che il job in posizione j deve prendere valore pari al job che si trova in posizione i
+          order_swap(i) := help !qui dico che il job in posizione i prende valore del job che era prima in posizione j
+          help2:= o_swap(order_swap(j)) !salvo il valore della macchina in cui viene lavorato il job che si trova nella posizione j-esima dell'ordinamento
+          o_swap(order_swap(j)):= o_swap(order_swap(i))
+          o_swap(order_swap(i)):= help2
+          forall(k in macchine) do !calcolo della z aggiornata dopo lo swap. Su ciascuna macchina si inseriscano i job secondo l'ordinamento, aggiornando di volta in volta il completion time
+            completion:= 0
+            forall(l in lavori) do
+              if(o_swap(order_swap(l)) = k) then !si inseriscano, nella k-esima macchina, i job che vengono effettivamente lavorati su tale macchina
+                completion += p(order_swap(l))
+                !writeln("\tcompletion time = ", completion)
+                if(completion > T) then !non si deve sforare l'orizzonte temporale fissato per il modello matematico. Nel caso lo si sfori, annulla lo swap che si è appena fatto
+                  !writeln("\tHo sforato")
+                  !completion:= completion - p(order_swap(l))
+                  sforato:= true
+                  break
+                end-if
+                !writeln("\t", completion ," * ", w(order_swap(l)) , " job ", order_swap(l) , " sulla macchina " , k)
+                z_swap += (completion * w(order_swap(l)))
+              end-if
+            end-do
+            if(sforato) then
+              break
+            end-if
+          end-do
+          !writeln("\tz_swap = ", z_swap ," | z_swap_incumbent = ", z_swap_incumbent, " | iterazione multi-start = ", contatore)
+          if(sforato) then
+            break
+          end-if
+          if(z_swap < z_swap_incumbent) then !best-improvement
+            z_swap_incumbent:= z_swap
+            order_swap_incumbent:= order_swap
+            o_swap_incumbent:= o_swap
+          end-if
+        end-do
+      end-do
+      if(z_swap_incumbent < z_swap_best) then
+        z_swap_best:= z_swap_incumbent !memorizzo il miglior swap trovato fino ad ora
+        order_swap_memoria:= order_swap_incumbent !faccio in modo che il prossimo swap venga effettuato a partire dalla soluzione _incumbent
+        o_swap_memoria:= o_swap_incumbent
+        order_swap_best:= order_swap_memoria
+        o_swap_best:= o_swap_memoria
+        improved:= true
+      end-if
+    end-do !fine while
+    writeln("\tRICERCA LOCALE:")
+    writeln("\tvalore best dello swap: ", z_swap_best)
+    !writeln("\tordinamento dei job best dello swap: ", order_swap_best)
+    !writeln("\tassegnamento alle macchine best dello swap: ", o_swap_best)
+    writeln(" ")
+  end-procedure
+
+  procedure PwC_MultiStart !procedura multi-start
+    declarations
+      order_multi_best: array(lavori) of integer !ordinamento dei job migliore del multi-start
+      o_multi_best: array(lavori) of integer !soluzione migliore del multi-start (assegnazione dei job alle macchine)
+      max_iter = 50 !massimo numero di iterazioni
+      t1_multi, t2_multi: real !tempi per il calcolo dei tempi di esecuzione per il multi-start
+      contatore_best: integer !memorizza l'iterazione del multi-start con soluzione migliore
+      soluzioni_multi: array(1..max_iter) of integer !memorizza tutte le soluzioni del nostro carissimo multi-start
+    end-declarations
+    writeln(" ")
+    writeln("INIZIO MULTI START: ")
+    writeln(" ")
+    t1_multi:=gettime
+    z_multi_best:= MAX_INT !iniziamo il multi-start dalla soluzione dell'euristico z_euristico, o da un valore grande a piacere?
+    !o_multi_best:= o_euristico
+    !order_multi_best:= order_euristico
+    z_multi_worst:= -MAX_INT !soluzione peggiore trovata dal multi-start
+    forall(iter in 1..max_iter) do
+      contatore:= contatore + 1 !incrementa il contatore all'avanzare delle iterazioni (serve per inizializzare il Simulated Annealing con la soluzione dell'euristico WSPT)
+      PwC_Ord_Casuale !si esegua un ordinamento random dei job
+      PwC_Euristico !si esegua l'algoritmo euristico con l'ordinamento random generato precedentemente
+      z_multi:= z_euristico
+      order_multi:= order_euristico
+      o_multi:= o_euristico
+      if(z_multi_worst < z_multi) then
+        z_multi_worst:= z_multi
+      end-if
+      PwC_Swap !si esegua una ricerca locale di tipo best-improvement sulla soluzione del multi-start appena trovata
+      soluzioni_multi(iter):= z_swap_best 
+      if(z_swap_best < z_multi_best) then
+        z_multi_best:= z_swap_best
+        order_multi_best:= order_swap_best
+        o_multi_best:= o_swap_best
+        contatore_best:= contatore
+      end-if
+    end-do
+    t2_multi:=gettime
+    minima_differenza:= MAX_INT
+    forall(i, j in 1..max_iter | j > i) do !troviamo la minima differenza tra tutte le soluzioni del multi-start
+      if(soluzioni_multi(i) - soluzioni_multi(j) > 0 AND soluzioni_multi(i) - soluzioni_multi(j) <= minima_differenza) then
+        minima_differenza:= soluzioni_multi(i) - soluzioni_multi(j)
+        !writeln("\tdifferenza: ", soluzioni_multi(i), " - ", soluzioni_multi(j), " = ", soluzioni_multi(i) - soluzioni_multi(j))
+      end-if
+    end-do 
+    writeln(" ")
+    writeln("MIGLIOR SOLUZIONE MULTI-START:")
+    writeln("\tz_multi_best = ", z_multi_best)
+    writeln("\torder_multi_best = ", order_multi_best)
+    writeln("\to_multi_best = ", o_multi_best)
+    writeln("\tz_multi_worst = ", z_multi_worst)
+    writeln("\tTempo esecuzione multi-start = ", t2_multi-t1_multi)
+    writeln("\titerazione del multi_best: ", contatore_best)
+    writeln("\tminima differenza/temperatura critica per il Simulated Annealing = ", minima_differenza)
+    writeln(" ")
+  end-procedure
+
+  procedure PwC_Ord_Casuale !ordinamento casuale dei job
+    declarations
+      wp_random: array(lavori) of real !rapporti w/p generati randomicamente
+      massimo: real !valore masismo
+      jmax: integer !job associato al valore masismo
+      used: array(lavori) of integer !array di supporto per l'ordinamento
+    end-declarations
+    !forall(j in lavori) wp_random(j):= random*100 !ordinamento random
+    forall(j in lavori) wp_random(j):= (w(j)/p(j))*0.7 + random*(w(j)/p(j))*0.4 !ordinamento random guidato
+    forall(j in lavori) used(j):= 0
+    forall(j in lavori) do
+      massimo:= -MAX_INT
+      forall(k in lavori) do
+        if(used(k)= 0 and wp_random(k) > massimo) then
+          massimo:= wp_random(k)
+          jmax:= k
+        end-if
+      end-do
+      order_euristico(j):= jmax !indice del lavoro più grande non ancora selezionato
+      used(jmax):= 1
+    end-do
+    !writeln("\tOrdinamento casuale = ",order_euristico)
+    !write("\tRAPPORTI RANDOM = ")
+    !forall(j in lavori) write(wp_random(order_euristico(j)), " ")
+  end-procedure
+
+  procedure PwC_Ord_Decrescente !ordinamento dei job per rapporto w/p decrescente
+  declarations
+    used: array(lavori) of integer !array di supporto per l'ordinamento
+    massimo: real !valore massimo
+    jmax: integer !job associato al valore massimo
+  end-declarations
+  forall(j in lavori) used(j):= 0 !inizializzazione dell'array di supporto
+  forall(j in lavori) do !ordinamento dei job per rapporto w/p decrescente
+    massimo:= -MAX_INT
+    forall(k in lavori) do
+      if(used(k)= 0 and (w(k)/p(k)) > massimo) then
+        massimo:= (w(k)/p(k))
+        jmax:= k
+      end-if
+    end-do
+    order_euristico(j):= jmax !indice del lavoro più grande non ancora selezionato
+    used(jmax):= 1
+  end-do
+  (!writeln("ORDINAMENTO DECRESCENTE :")
+  writeln("\tJob Ordinati = ",order_euristico)
+  writeln("\tRapporti Wj/Pj = ")
+  forall(j in lavori) writeln("\t",w(order_euristico(j)), "/", p(order_euristico(j)), " = ", w(order_euristico(j))/p(order_euristico(j)), " " )
+  writeln(" ")!)
+  end-procedure
+
+  procedure PwC_Euristico !euristico costruttivo greedy con ordinamento WSPT
+    declarations
+      istante_libero: array(macchine) of integer !istante in cui una specifica macchina si libera (completion time di una macchina)
+      j: integer !job preso in considerazione
+      minimo, i_minima: integer !valori interi per definire la macchina più scarica
+    end-declarations
+    z_euristico:= 0
+    forall(i in macchine) istante_libero(i):= 0 !ogni macchina inizialmente è libera sin dal primo istante
+    forall(indice in lavori) do
+      j:= order_euristico(indice) !si prendano, in ordine, i job ordinati per rapporto decrescente w/p - ordinamento WSPT
+      minimo:= MAX_INT
+      forall(i in macchine) do !ricerca della macchina più scarica
+        if(istante_libero(i) < minimo) then
+          minimo:= istante_libero(i)
+          i_minima:= i
+        end-if
+      end-do
+      o_euristico(j):= i_minima !assegno il j-esimo job alla i-esima macchina (macchina più scarica)
+      istante_libero(i_minima) += p(j) !aggiornamento istante di liberazione della i-esima macchina
+      z_euristico += (istante_libero(i_minima) * w(j))
+    end-do
+    if(contatore = 0) then !valore dell'algoritmo euristico da utilizzare nel Simulated Annealing
+      z_simulated:= z_euristico
+      order_simulated:= order_euristico
+      o_simulated:= o_euristico
+      writeln("\tz_euristico :", z_euristico)
+      writeln("\tjob Ordinati = ",order_euristico)
+      writeln("\to_euristico :", o_euristico)
+    else !le soluzioni successive al contatore = 0 sono generate dal multi-start
+      writeln("\tMULTI-START:")
+      writeln("\titerazione multi-start = ", contatore)
+      writeln("\tsoluzione del multi-start: ", z_euristico)
+    end-if
+  end-procedure
+
+  procedure PwC_Model !modello matematico (1)-(4)
+    declarations
+      istanti = 0..T !istanti di tempo di tutto l'orizzonte temporale T
+      z: linctr !valore soluzione modello
+      x: array(lavori, istanti) of mpvar !valore variabile decisionale
+    end-declarations
+    z:= sum(j in lavori, t in 0..T-p(j)) w(j)*t*x(j,t) + sum(j in lavori) w(j)*p(j) !(1) - funzione obiettivo modello matematico
+    forall(j in lavori) sum(t in 0..T-p(j)) x(j,t) = 1 !(2) - vincolo di grado
+    forall(t in 0..T-1) sum(j in lavori, s in maxlist(0, t+1-p(j))..minlist(t, T+1-p(j))) x(j,s) <= m  !(3) - vincolo di capacità
+    forall(j in lavori, t in 0..T-p(j)) x(j,t) is_binary !(4) - dominio delle variabili
+    t1:= gettime
+    minimize(z)
+    t2:= gettime
+    writeln("SOLUZIONE MODELLO MATEMATICO:")
+    Print_Status
+    writeln("\tTempo esecuzione modello = ", t2-t1)
+    writeln("\tz = ", getobjval)
+    forall(t in 0..T, j in lavori) do
+      if ( getsol(x(j,t)) > eps AND t <= T-p(j)) then
+        write("\tx(",j,",",t,") = ", getsol( x(j,t) ), "\t")
+        writeln("Il job ", j ," viene eseguito all'istante ", t)
+      end-if
+    end-do
+  end-procedure
+
+  procedure PwC_Input !lettura input
+    initialisations from inputfile
+      p
+      w
+    end-initialisations
+    p_max:= -MAX_INT 
+    forall(i in lavori) do !troviamo il tempo di processamento maggiore tra tutti i job
+      if(p(i) >= p_max) then
+        p_max:= p(i)
+      end-if
+    end-do
+    T:= floor((1/m)*(sum(j in lavori) p(j)) +  ((m - 1)*p_max)/m) !calcolo dell'orizzonte temporale
+    writeln("INPUT:")
+    writeln("\tlavori = ", lavori)
+    writeln("\tmacchine = ", macchine)
+    writeln("\tT = ", T)
+    writeln("\ttempi = ", p)
+    writeln("\tpesi = ", w)
+    writeln(" ")
+  end-procedure
+
+  procedure Print_Status !stato del modello
+    declarations
+      solution_status: string
+    end-declarations
+		case getprobstat of
+			XPRS_OPT: solution_status:="Optimum found"
+			XPRS_UNF: solution_status:="Unfinished"
+			XPRS_INF: solution_status:="Infeasible"
+			XPRS_UNB: solution_status:="Unbounded"
+			XPRS_OTH: solution_status:="Failed"
+			else solution_status:="???"
+		end-case
+		writeln("\tProblem status: ", solution_status)
+	end-procedure
+
+end-model
